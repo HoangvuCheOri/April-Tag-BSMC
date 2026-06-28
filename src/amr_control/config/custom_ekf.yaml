@@ -1,0 +1,35 @@
+custom_ekf_node:
+  ros__parameters:
+    frequency: 20.0
+    sensor_timeout: 0.5
+
+    odom_topic: /odom_raw
+    imu_topic: /imu/data
+    output_topic: /odometry/filtered
+    reset_topic: /reset_odom
+
+    odom_frame: odom
+    base_link_frame: base_link
+    publish_tf: true
+
+    # Match the old robot_localization setup:
+    # odom provides x, y, vx; imu provides yaw rate.
+    use_odom_yaw: false
+    use_odom_w: false
+    imu_w_sign: -1.0
+    odom_w_sign: 1.0
+
+    initial_covariance: 0.05
+
+    process_noise_x: 0.002
+    process_noise_y: 0.002
+    process_noise_theta: 0.004
+    process_noise_v: 0.08
+    process_noise_w: 0.12
+
+    odom_x_variance: 0.01
+    odom_y_variance: 0.01
+    odom_yaw_variance: 0.08
+    odom_v_variance: 0.04
+    odom_w_variance: 0.60
+    imu_w_variance: 0.01
