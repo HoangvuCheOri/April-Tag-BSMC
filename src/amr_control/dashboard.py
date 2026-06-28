@@ -12,12 +12,22 @@ import math
 class DashboardNode(Node):
     def __init__(self):
         super().__init__('dashboard_node')
-        self.sub_odom = self.create_subscription(Odometry, '/odom_raw', self.odom_cb, 10)
+        self.sub_odom_raw = self.create_subscription(Odometry, '/odom_raw', self.odom_raw_cb, 10)
+        self.sub_odom_camera = self.create_subscription(Odometry, '/odom_camera', self.odom_camera_cb, 10)
+        self.sub_odom_camera_aligned = self.create_subscription(Odometry, '/odom_camera_aligned', self.odom_camera_aligned_cb, 10)
+        self.sub_odom_filtered = self.create_subscription(Odometry, '/odometry/filtered', self.odom_filtered_cb, 10)
+        self.sub_desired = self.create_subscription(Point, '/desired_trajectory', self.desired_cb, 10)
         self.sub_state = self.create_subscription(Float32MultiArray, '/robot_state', self.state_cb, 10)
         self.sub_err = self.create_subscription(Point, '/tracking_error', self.err_cb, 10)
         
-        self.x_hist = deque(maxlen=50000)
-        self.y_hist = deque(maxlen=50000)
+        self.raw_x_hist = deque(maxlen=50000)
+        self.raw_y_hist = deque(maxlen=50000)
+        self.camera_x_hist = deque(maxlen=50000)
+        self.camera_y_hist = deque(maxlen=50000)
+        self.camera_aligned_x_hist = deque(maxlen=50000)
+        self.camera_aligned_y_hist = deque(maxlen=50000)
+        self.filtered_x_hist = deque(maxlen=50000)
+        self.filtered_y_hist = deque(maxlen=50000)
         self.xd_hist = deque(maxlen=50000)
         self.yd_hist = deque(maxlen=50000)
         
@@ -35,18 +45,36 @@ class DashboardNode(Node):
         self.current_yaw = 0.0
         self.odom_received = False
         
-    def odom_cb(self, msg):
-        self.current_x = msg.pose.pose.position.x
-        self.current_y = msg.pose.pose.position.y
-        
+    def yaw_from_odom(self, msg):
         q = msg.pose.pose.orientation
         siny_cosp = 2 * (q.w * q.z + q.x * q.y)
         cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
-        self.current_yaw = math.atan2(siny_cosp, cosy_cosp)
+        return math.atan2(siny_cosp, cosy_cosp)
+
+    def odom_raw_cb(self, msg):
+        self.raw_x_hist.append(msg.pose.pose.position.x)
+        self.raw_y_hist.append(msg.pose.pose.position.y)
+
+    def odom_camera_cb(self, msg):
+        self.camera_x_hist.append(msg.pose.pose.position.x)
+        self.camera_y_hist.append(msg.pose.pose.position.y)
+
+    def odom_camera_aligned_cb(self, msg):
+        self.camera_aligned_x_hist.append(msg.pose.pose.position.x)
+        self.camera_aligned_y_hist.append(msg.pose.pose.position.y)
+
+    def odom_filtered_cb(self, msg):
+        self.current_x = msg.pose.pose.position.x
+        self.current_y = msg.pose.pose.position.y
+        self.current_yaw = self.yaw_from_odom(msg)
         
-        self.x_hist.append(self.current_x)
-        self.y_hist.append(self.current_y)
+        self.filtered_x_hist.append(self.current_x)
+        self.filtered_y_hist.append(self.current_y)
         self.odom_received = True
+
+    def desired_cb(self, msg):
+        self.xd_hist.append(msg.x)
+        self.yd_hist.append(msg.y)
         
     def state_cb(self, msg):
         if self.start_time is None:
@@ -66,13 +94,6 @@ class DashboardNode(Node):
         self.ex_hist.append(msg.x)
         self.ey_hist.append(msg.y)
         
-        # Tái tạo lại tọa độ desired từ sai số và pose hiện tại
-        if self.odom_received:
-            dx = msg.x * math.cos(self.current_yaw) - msg.y * math.sin(self.current_yaw)
-            dy = msg.x * math.sin(self.current_yaw) + msg.y * math.cos(self.current_yaw)
-            self.xd_hist.append(self.current_x + dx)
-            self.yd_hist.append(self.current_y + dy)
-
 node = None
 
 def spin_thread():
@@ -101,11 +122,14 @@ def main():
     ax1.set_title("Trajectory (X - Y)")
     ax1.set_xlabel("X (m)")
     ax1.set_ylabel("Y (m)")
-    line_traj_d, = ax1.plot([], [], 'r--', linewidth=2, label='Desired Trajectory', alpha=0.7)
-    line_traj, = ax1.plot([], [], 'b-', linewidth=2, label='Actual Trajectory')
+    line_traj_d, = ax1.plot([], [], 'r--', linewidth=2, label='Desired', alpha=0.7)
+    line_raw, = ax1.plot([], [], color='0.45', linestyle=':', linewidth=1.5, label='Wheel odom (/odom_raw)')
+    line_camera, = ax1.plot([], [], 'g.', markersize=2.0, alpha=0.35, label='Camera raw')
+    line_camera_aligned, = ax1.plot([], [], color='orange', linestyle='-', linewidth=1.5, label='Camera aligned')
+    line_filtered, = ax1.plot([], [], 'b-', linewidth=2, label='Filtered actual')
     ax1.legend()
-    # Dùng adjustable='datalim' kết hợp với autoscale_view để lấp đầy toàn bộ khoảng trắng 2 bên
-    ax1.set_aspect('equal', adjustable='datalim')
+    # Giữ đúng tỉ lệ mét trên X/Y để vòng tròn không bị vẽ thành ellipse.
+    ax1.set_aspect('equal', adjustable='box')
     
     # 2. Biểu đồ Sai số (e_x, e_y)
     ax2 = fig.add_subplot(2, 2, 2)
@@ -128,13 +152,33 @@ def main():
     
     def update(frame):
         # Update Trajectory
-        if len(node.x_hist) > 0:
-            line_traj.set_data(node.x_hist, node.y_hist)
-            if len(node.xd_hist) > 0:
-                line_traj_d.set_data(node.xd_hist, node.yd_hist)
-                
-            all_x = list(node.x_hist) + list(node.xd_hist)
-            all_y = list(node.y_hist) + list(node.yd_hist)
+        if (
+            len(node.raw_x_hist) > 0
+            or len(node.camera_x_hist) > 0
+            or len(node.camera_aligned_x_hist) > 0
+            or len(node.filtered_x_hist) > 0
+            or len(node.xd_hist) > 0
+        ):
+            line_raw.set_data(node.raw_x_hist, node.raw_y_hist)
+            line_camera.set_data(node.camera_x_hist, node.camera_y_hist)
+            line_camera_aligned.set_data(node.camera_aligned_x_hist, node.camera_aligned_y_hist)
+            line_filtered.set_data(node.filtered_x_hist, node.filtered_y_hist)
+            line_traj_d.set_data(node.xd_hist, node.yd_hist)
+
+            all_x = (
+                list(node.raw_x_hist)
+                + list(node.camera_x_hist)
+                + list(node.camera_aligned_x_hist)
+                + list(node.filtered_x_hist)
+                + list(node.xd_hist)
+            )
+            all_y = (
+                list(node.raw_y_hist)
+                + list(node.camera_y_hist)
+                + list(node.camera_aligned_y_hist)
+                + list(node.filtered_y_hist)
+                + list(node.yd_hist)
+            )
             
             if all_x and all_y:
                 min_x, max_x = min(all_x), max(all_x)
@@ -144,8 +188,15 @@ def main():
                     # Reset data limits và đưa bounding box của trajectory vào
                     ax1.ignore_existing_data_limits = True
                     ax1.update_datalim([[min_x, min_y], [max_x, max_y]])
-                    # Tự động scale khung nhìn (nó sẽ tự động mở rộng trục X để lấp đầy khoảng trắng 2 bên)
-                    ax1.autoscale_view()
+                    span_x = max(max_x - min_x, 0.1)
+                    span_y = max(max_y - min_y, 0.1)
+                    span = max(span_x, span_y)
+                    cx = 0.5 * (min_x + max_x)
+                    cy = 0.5 * (min_y + max_y)
+                    margin = 0.08 * span
+                    half = 0.5 * span + margin
+                    ax1.set_xlim(cx - half, cx + half)
+                    ax1.set_ylim(cy - half, cy + half)
             
         # Update Errors
         if len(node.err_time_hist) > 0:
@@ -168,7 +219,7 @@ def main():
             if all_rpms:
                 ax3.set_ylim(min(all_rpms) - 10, max(all_rpms) + 10)
                 
-        return line_traj, line_traj_d, line_ex, line_ey, line_rpmL, line_rpmR
+        return line_raw, line_camera, line_camera_aligned, line_filtered, line_traj_d, line_ex, line_ey, line_rpmL, line_rpmR
         
     ani = animation.FuncAnimation(fig, update, interval=100, cache_frame_data=False)
     plt.tight_layout()

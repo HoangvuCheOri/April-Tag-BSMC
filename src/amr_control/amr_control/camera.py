@@ -18,6 +18,7 @@ import queue
 import pupil_apriltags as apriltag
 import yaml
 from collections import deque
+from datetime import datetime
 
 class Kalman1D:
     def __init__(self, Q=1e-2, R=1e-5, P=1.0, x0=0.0):
@@ -136,7 +137,7 @@ class CameraPoseEstimator(Node):
         )
 
         self.ip_url = f"rtsp://{os.getenv('CAMERA_USERNAME', 'admin')}:{os.getenv('CAMERA_PASSWORD', 'lab208b3')}@" \
-                 f"{os.getenv('CAMERA_IP', '192.168.100.56')}:{os.getenv('CAMERA_PORT', '554')}/cam/realmonitor?channel=1&subtype=1"
+                 f"{os.getenv('CAMERA_IP', '192.168.100.56')}:{os.getenv('CAMERA_PORT', '554')}/cam/realmonitor?channel=1&subtype=0"
 
         # Calibration & detector (Đã calibrate ở độ phân giải 1280x720)
         self.base_camera_matrix = np.array([[767.6786, 0., 637.4356],
@@ -397,9 +398,9 @@ class CameraPoseEstimator(Node):
         ]
 
         for p0, p1 in zip(points, points[1:]):
-            cv2.line(frame, p0, p1, (0, 0, 255), 3, cv2.LINE_AA)
+            cv2.line(frame, p0, p1, (0, 0, 255), 1, cv2.LINE_AA)
 
-        cv2.circle(frame, points[-1], 5, (0, 0, 255), -1, cv2.LINE_AA)
+        cv2.circle(frame, points[-1], 3, (0, 0, 255), -1, cv2.LINE_AA)
         return True
 
     def map_offset_to_pixel(self, anchor_pixel, px_per_meter, dx, dy):
@@ -493,12 +494,12 @@ class CameraPoseEstimator(Node):
                 and -margin <= p1[1] <= h + margin
             ):
                 continue
-            cv2.line(frame, p0, p1, (0, 0, 255), 3, cv2.LINE_AA)
+            cv2.line(frame, p0, p1, (0, 0, 255), 1, cv2.LINE_AA)
 
         cv2.circle(
             frame,
             (int(round(self.current_tag_pixel[0])), int(round(self.current_tag_pixel[1]))),
-            5,
+            3,
             (0, 0, 255),
             -1,
             cv2.LINE_AA,
@@ -538,10 +539,10 @@ class CameraPoseEstimator(Node):
         for p0, p1 in zip(pixels, pixels[1:]):
             if p0 is None or p1 is None:
                 continue
-            cv2.line(frame, p0, p1, (0, 0, 255), 3, cv2.LINE_AA)
+            cv2.line(frame, p0, p1, (0, 0, 255), 1, cv2.LINE_AA)
 
         if pixels[-1] is not None:
-            cv2.circle(frame, pixels[-1], 5, (0, 0, 255), -1, cv2.LINE_AA)
+            cv2.circle(frame, pixels[-1], 3, (0, 0, 255), -1, cv2.LINE_AA)
 
     def timer_callback(self):
         try:
@@ -600,18 +601,37 @@ class CameraPoseEstimator(Node):
 
             R_orig, _ = cv2.Rodrigues(rvec)
             
-            # Lấy góc yaw nguyên bản từ rvec (trục X của tag so với trục X của camera)
+            # ===== TÍNH TỌA ĐỘ MẶT PHẲNG SÀN BÙ NGHIÊNG CAMERA =====
+            # Lấy góc yaw từ rotation matrix
             yaw_cam = yaw_from_rotation_matrix(R_orig)
             
-            # Hệ tọa độ mới: X hướng LÊN (0 độ), Y hướng SANG TRÁI (90 độ)
-            # yaw_cam khi hướng LÊN là -90 độ. Ta dịch lại để hướng LÊN = 0 độ.
+            # Khử góc quay quanh trục Z của Tag để lấy ma trận nghiêng thuần túy của Camera so với Sàn
+            Rz_yaw = np.array([
+                [math.cos(yaw_cam), -math.sin(yaw_cam), 0],
+                [math.sin(yaw_cam),  math.cos(yaw_cam), 0],
+                [0,                  0,                 1]
+            ])
+            
+            # R_floor2cam là ma trận cố định biểu diễn độ nghiêng của camera so với mặt sàn.
+            # Nó không bị thay đổi dù robot (tag) có xoay tròn tại chỗ.
+            R_floor2cam = R_orig @ Rz_yaw.T  
+            
+            # Chiếu tọa độ tvec (trong hệ camera) xuống mặt phẳng sàn (đã khử nghiêng)
+            pos_floor = R_floor2cam.T @ tvec
+            
+            # pos_floor[0] = sang phải trên màn hình (trục X cố định)
+            # pos_floor[1] = xuống dưới trên màn hình (trục Y cố định)
+            # Chuyển sang hệ tọa độ của hệ thống (X hướng Lên, Y hướng Trái)
+            # Dựa trên test độc lập: Tiến 1.0m X đo ra 1.2m -> Khử giãn hình dọc chia 1.2
+            robot_x = (-pos_floor[1, 0]) / 1.2
+            robot_y = -pos_floor[0, 0]
+            
+            # Hệ tọa độ Yaw mới: X hướng LÊN (0 độ), Y hướng SANG TRÁI (90 độ)
             yaw_deg = normalize_angle_deg(-(math.degrees(yaw_cam) + 90.0))
 
             # Kalman filtering
-            # X hướng lên trên màn hình (Camera -Y)
-            self.pose['x'] = self.kalman_x.update(-tvec[1][0])
-            # Y hướng sang trái màn hình (Camera -X)
-            self.pose['y'] = self.kalman_y.update(-tvec[0][0])
+            self.pose['x'] = self.kalman_x.update(robot_x)
+            self.pose['y'] = self.kalman_y.update(robot_y)
             self.latest_tag_depth = float(tvec[2][0])
             tag_center = np.mean(img_pts, axis=0)
             self.current_tag_pixel = (float(tag_center[0]), float(tag_center[1]))
@@ -687,34 +707,25 @@ class CameraPoseEstimator(Node):
             odom_msg.pose.pose.orientation.z = quat[2]
             odom_msg.pose.pose.orientation.w = quat[3]
 
-            # Ma trận hiệp phương sai (Covariance) - Cho EKF biết độ tin cậy của Camera
-            # Để giá trị nhỏ (0.01) để EKF tin camera hơn encoder về vị trí
+            # Ma trận hiệp phương sai (Covariance) - camera dùng để sửa drift,
+            # không ép EKF bám quá gắt khi scale/yaw camera chưa thật chuẩn.
             P = odom_msg.pose.covariance
-            P[0] = 0.01  # x
-            P[7] = 0.01  # y
-            P[35] = 0.05 # yaw
+            P[0] = 0.08  # x
+            P[7] = 0.08  # y
+            P[35] = 1.00 # yaw
 
             self.pose_pub.publish(odom_msg)
 
             # --- THÊM PHẦN VISUALIZATION ---
-            # 1. Vẽ khung vuông bao quanh AprilTag (màu xanh lá) - Tăng độ đậm lên 4
+            # 1. Vẽ khung vuông bao quanh AprilTag (màu xanh lá)
             pts = img_pts.astype(int)
             for i in range(4):
-                cv2.line(frame, tuple(pts[i]), tuple(pts[(i+1)%4]), (0, 255, 0), 4)
+                cv2.line(frame, tuple(pts[i]), tuple(pts[(i+1)%4]), (0, 255, 0), 2)
             
-            cv2.putText(frame, f"AprilTag ID: {det.tag_id}", tuple(pts[3] + [0, 25]),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            cv2.putText(frame, f"AprilTag ID: {det.tag_id}", tuple(pts[3] + [0, 20]),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
-            cv2.drawFrameAxes(frame, camera_matrix, dist_coeffs, rvec, tvec, 0.2, 5)
-
-            # Vẽ khung nền đen mờ và ghi text tọa độ lên góc trái màn hình
-            overlay = frame.copy()
-            cv2.rectangle(overlay, (10, 10), (250, 100), (0, 0, 0), -1)
-            frame = cv2.addWeighted(overlay, 0.5, frame, 0.5, 0)
-            
-            cv2.putText(frame, f"X: {self.pose['x']:.3f} m", (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-            cv2.putText(frame, f"Y: {self.pose['y']:.3f} m", (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-            cv2.putText(frame, f"Yaw: {self.pose['yaw']:.2f} deg", (20, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            cv2.drawFrameAxes(frame, camera_matrix, dist_coeffs, rvec, tvec, 0.1, 2)
 
             break
 
@@ -722,9 +733,26 @@ class CameraPoseEstimator(Node):
         self.draw_warp_calibration(frame)
         display_frame = self.apply_warp(frame)
 
-        # KÉO GIÃN 16:9 VÀ XÓA THỜI GIAN TRƯỚC KHI HIỂN THỊ
+        # KÉO GIÃN 16:9 TRƯỚC KHI HIỂN THỊ
         display_frame = cv2.resize(display_frame, (1280, 720))
-        cv2.rectangle(display_frame, (800, 0), (1280, 80), (0, 0, 0), -1)
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cv2.rectangle(display_frame, (815, 0), (1280, 70), (0, 0, 0), -1)
+        cv2.putText(display_frame, timestamp, (920, 45),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(display_frame, timestamp, (920, 45),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
+
+        if self.pose['x'] is not None and self.pose['y'] is not None and self.pose['yaw'] is not None:
+            overlay = display_frame.copy()
+            cv2.rectangle(overlay, (10, 10), (235, 95), (0, 0, 0), -1)
+            display_frame = cv2.addWeighted(overlay, 0.35, display_frame, 0.65, 0)
+            cv2.putText(display_frame, f"X: {self.pose['x']:.3f} m", (20, 35),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.putText(display_frame, f"Y: {self.pose['y']:.3f} m", (20, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.putText(display_frame, f"Yaw: {self.pose['yaw']:.2f} deg", (20, 85),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
 
         # Show cửa sổ hình ảnh (Hiển thị liên tục kể cả khi không thấy tag)
         cv2.imshow(self.window_name, display_frame)

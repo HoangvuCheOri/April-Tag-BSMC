@@ -9,9 +9,9 @@ import threading
 from std_msgs.msg import Bool, String
 
 
-class BSMCCircle(Node):
+class BSMCCircleOneLap(Node):
     def __init__(self):
-        super().__init__('bsmc_circle')
+        super().__init__('bsmc_circle_one_lap')
 
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.err_pub = self.create_publisher(Point, '/tracking_error', 10)
@@ -19,7 +19,7 @@ class BSMCCircle(Node):
         self.desired_mode_pub = self.create_publisher(String, '/desired_trajectory_mode', 10)
 
         self.odom_sub = self.create_subscription(
-            Odometry, '/odometry/filtered', self.odom_callback, 10
+            Odometry, '/odom_raw', self.odom_callback, 10
         )
 
         self.current_x = 0.0
@@ -88,7 +88,7 @@ class BSMCCircle(Node):
         self.debug_counter = 0
 
         self.get_logger().info(
-            f"BSMC Circle v3 started. "
+            f"BSMC Circle (1 LAP MODE) started. "
             f"R={self.R}, W={self.W}, vd={self.VD:.3f} m/s (~{self.VD/(3.14159*0.063/60.0):.0f} RPM)"
         )
         self.get_logger().info(">>> Nhấn 'p' rồi Enter trên terminal này để TẠM DỪNG / CHẠY TIẾP <<<")
@@ -174,7 +174,7 @@ class BSMCCircle(Node):
         y_d = self.y0 + sin0 * x_local + cos0 * y_local
         theta_d = self.normalize_angle(self.theta0 + theta_local)
 
-        return x_d, y_d, theta_d, v_d, w_d
+        return x_d, y_d, theta_d, v_d, w_d, ang
 
     def control_loop(self):
         if not self.odom_received:
@@ -208,7 +208,18 @@ class BSMCCircle(Node):
 
         t_track = t - self.STARTUP_DELAY
 
-        x_d, y_d, theta_d, v_d, w_d = self.generate_desired_trajectory(t_track)
+        x_d, y_d, theta_d, v_d, w_d, ang = self.generate_desired_trajectory(t_track)
+
+        if ang >= 2 * math.pi:
+            self.get_logger().info("🚀 ĐÃ HOÀN THÀNH 1 VÒNG! Đang tự động dừng robot...")
+            self.cmd_pub.publish(Twist())
+            
+            # Publish 0 velocities multiple times to make sure it stops
+            for _ in range(5):
+                self.cmd_pub.publish(Twist())
+                
+            self.timer.cancel()
+            return
 
         desired_msg = Point()
         desired_msg.x = float(x_d)
@@ -296,7 +307,7 @@ class BSMCCircle(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = BSMCCircle()
+    node = BSMCCircleOneLap()
 
     try:
         rclpy.spin(node)

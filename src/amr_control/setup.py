@@ -28,6 +28,7 @@ setup(
             'custom_ekf_node = amr_control.custom_ekf_node:main',
             'bsmc_controller = amr_control.bsmc_controller:main',
             'bsmc_circle = amr_control.bsmc_circle:main',
+            'bsmc_circle_one_lap = amr_control.bsmc_circle_one_lap:main',
             'bsmc_eight = amr_control.bsmc_eight:main',
             'trajectory_plotter = amr_control.trajectory_plotter:main',
             'robot_serial_bridge = amr_control.robot_serial_bridge:main',
